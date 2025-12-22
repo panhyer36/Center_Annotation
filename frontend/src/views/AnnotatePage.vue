@@ -5,6 +5,7 @@
       <h1>Image Annotation</h1>
       <div class="progress">
         {{ currentIndex + 1 }} / {{ images.length }}
+        <span v-if="isFileAnnotated" class="annotated-badge">Annotated</span>
       </div>
     </div>
 
@@ -118,11 +119,11 @@ const router = useRouter()
 const labels = ref(JSON.parse(sessionStorage.getItem('labels') || '[]'))
 const images = ref(JSON.parse(sessionStorage.getItem('images') || '[]'))
 const selectedAxis = ref(sessionStorage.getItem('selectedAxis') || 'sagittal')
-const savedSliceIndices = JSON.parse(sessionStorage.getItem('sliceIndices') || '{}')
 
 const currentIndex = ref(0)
 const currentAxis = ref(selectedAxis.value)
-const sliceIndex = ref(savedSliceIndices[selectedAxis.value] || 0)
+const sliceIndex = ref(0)
+const annotatedFiles = ref([])
 const maxSliceIndex = ref(0)
 const currentLabel = ref(labels.value[0] || '')
 const currentImage = ref(null)
@@ -150,6 +151,10 @@ const currentAnnotations = computed(() => {
   return annotationsMap.value[currentFilename.value] || []
 })
 
+const isFileAnnotated = computed(() => {
+  return annotatedFiles.value.includes(currentFilename.value)
+})
+
 function isAnnotated(label) {
   return currentAnnotations.value.some(ann => ann.label === label)
 }
@@ -159,10 +164,20 @@ onMounted(async () => {
     router.push('/')
     return
   }
+  await loadAnnotatedFiles()
   await loadImageInfo()
   await loadSlice()
   await loadExistingAnnotations()
 })
+
+async function loadAnnotatedFiles() {
+  try {
+    const response = await axios.get(`${API_BASE}/api/annotated-files`)
+    annotatedFiles.value = response.data.annotated_files
+  } catch (error) {
+    console.error('Failed to load annotated files:', error)
+  }
+}
 
 async function loadImageInfo() {
   try {
@@ -171,13 +186,8 @@ async function loadImageInfo() {
     )
     imageInfo.value = response.data
     updateMaxSliceIndex()
-    // Use saved slice index, or use middle value if none exists
-    const savedIndex = savedSliceIndices[currentAxis.value]
-    if (savedIndex !== undefined && savedIndex <= maxSliceIndex.value) {
-      sliceIndex.value = savedIndex
-    } else {
-      sliceIndex.value = Math.floor(maxSliceIndex.value / 2)
-    }
+    // Always use middle slice as default for each image
+    sliceIndex.value = Math.floor(maxSliceIndex.value / 2)
   } catch (error) {
     console.error('Failed to load image info:', error)
   }
@@ -388,6 +398,8 @@ async function saveAnnotations() {
       filename: currentFilename.value,
       annotations: currentAnnotations.value
     })
+    // Update annotated files list
+    await loadAnnotatedFiles()
     showMessage('Annotations saved', 'success')
   } catch (error) {
     showMessage('Save failed: ' + (error.response?.data?.detail || error.message), 'error')
@@ -474,6 +486,18 @@ watch(sliceIndex, () => {
   font-size: 1.2em;
   color: #e94560;
   font-weight: bold;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.annotated-badge {
+  background: #4ade80;
+  color: #000;
+  font-size: 0.7em;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-weight: 500;
 }
 
 .main-content {

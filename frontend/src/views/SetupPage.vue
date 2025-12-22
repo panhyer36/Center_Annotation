@@ -21,6 +21,9 @@
         </div>
         <p v-if="fileCount > 0" class="success-msg">
           Found {{ fileCount }} nii.gz files
+          <span v-if="annotatedCount > 0" class="annotated-info">
+            ({{ annotatedCount }} annotated)
+          </span>
         </p>
         <p v-if="errorMsg" class="error-msg">{{ errorMsg }}</p>
       </div>
@@ -164,6 +167,8 @@ const previews = ref(null)
 const imageInfo = ref(null)
 const selectedAxis = ref('sagittal')
 const images = ref([])
+const annotatedFiles = ref([])
+const annotatedCount = ref(0)
 
 // Slice indices (independent for each direction)
 const sliceIndices = reactive({
@@ -254,6 +259,9 @@ async function setFolder() {
     const imagesResponse = await axios.get(`${API_BASE}/api/images`)
     images.value = imagesResponse.data.images
 
+    // Load annotated files list
+    await loadAnnotatedFiles()
+
     // Load preview of the first image
     if (images.value.length > 0) {
       await loadPreviewAndInfo()
@@ -262,6 +270,16 @@ async function setFolder() {
     errorMsg.value = error.response?.data?.detail || 'Failed to connect to server'
   } finally {
     loading.value = false
+  }
+}
+
+async function loadAnnotatedFiles() {
+  try {
+    const response = await axios.get(`${API_BASE}/api/annotated-files`)
+    annotatedFiles.value = response.data.annotated_files
+    annotatedCount.value = annotatedFiles.value.length
+  } catch (error) {
+    console.error('Failed to load annotated files:', error)
   }
 }
 
@@ -391,6 +409,11 @@ function startAnnotation() {
 .success-msg {
   color: #4ade80;
   margin-top: 12px;
+}
+
+.annotated-info {
+  color: #60a5fa;
+  font-weight: 500;
 }
 
 .error-msg {

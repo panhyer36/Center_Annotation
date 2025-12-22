@@ -107,9 +107,8 @@ async def set_folder(request: FolderRequest):
         raise HTTPException(status_code=400, detail="No nii.gz files in folder")
 
     state["folder_path"] = str(folder_path)
-    # Labels folder is set in the project root directory
-    project_root = folder_path.parent
-    state["labels_folder"] = str(project_root / "Labels")
+    # Labels folder is set inside the selected folder
+    state["labels_folder"] = str(folder_path / "Labels")
 
     # Ensure Labels folder exists
     os.makedirs(state["labels_folder"], exist_ok=True)
@@ -233,6 +232,23 @@ async def get_annotations(filename: str):
         return {"annotations": annotations}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/annotated-files")
+async def get_annotated_files():
+    """Get list of annotated files"""
+    if not state["labels_folder"]:
+        raise HTTPException(status_code=400, detail="Folder not set yet")
+
+    labels_path = Path(state["labels_folder"])
+    if not labels_path.exists():
+        return {"annotated_files": []}
+
+    # Find all CSV files and convert back to original filenames
+    csv_files = list(labels_path.glob("*.csv"))
+    annotated_files = [f.stem + ".nii.gz" for f in csv_files]
+
+    return {"annotated_files": annotated_files}
 
 
 @app.get("/api/preview/{filename}")
