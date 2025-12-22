@@ -32,9 +32,47 @@
             ref="canvas"
             @click="handleCanvasClick"
             @mousemove="handleMouseMove"
+            @mouseleave="handleMouseLeave"
           ></canvas>
+
+          <!-- Magnifier popup -->
+          <div
+            v-if="showMagnifier && magnifierEnabled && magnifierPos"
+            class="magnifier"
+            :style="magnifierStyle"
+          >
+            <canvas ref="magnifierCanvas"></canvas>
+          </div>
+
+          <!-- Cursor info -->
           <div class="cursor-info" v-if="cursorPos">
             X: {{ cursorPos.x }}, Y: {{ cursorPos.y }}
+          </div>
+
+          <!-- Tools panel -->
+          <div class="tools-panel">
+            <label class="tool-item" :class="{ active: binarizeEnabled }">
+              <input type="checkbox" v-model="binarizeEnabled" @change="drawCanvas" />
+              <span>Binarize</span>
+            </label>
+            <div v-if="binarizeEnabled" class="threshold-slider">
+              <input
+                type="range"
+                v-model.number="binarizeThreshold"
+                min="0"
+                max="255"
+                @input="drawCanvas"
+              />
+              <span>{{ binarizeThreshold }}</span>
+            </div>
+            <label class="tool-item" :class="{ active: edgeEnabled }">
+              <input type="checkbox" v-model="edgeEnabled" @change="drawCanvas" />
+              <span>Edge Detection</span>
+            </label>
+            <label class="tool-item" :class="{ active: magnifierEnabled }">
+              <input type="checkbox" v-model="magnifierEnabled" />
+              <span>Magnifier</span>
+            </label>
           </div>
         </div>
 
@@ -107,7 +145,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import axios from 'axios'
 
@@ -135,9 +173,32 @@ const messageType = ref('success')
 
 const canvas = ref(null)
 const imageContainer = ref(null)
+const magnifierCanvas = ref(null)
 
 // Annotation data for each image
 const annotationsMap = ref({})
+
+// Image scaling state
+const scaleRatio = ref(1)
+const originalImageData = ref(null)
+
+// Tools state
+const binarizeEnabled = ref(false)
+const binarizeThreshold = ref(128)
+const edgeEnabled = ref(false)
+const magnifierEnabled = ref(false)
+const showMagnifier = ref(false)
+const magnifierPos = ref(null)
+const magnifierSize = 150
+const magnifierZoom = 3
+
+const magnifierStyle = computed(() => {
+  if (!magnifierPos.value) return {}
+  return {
+    left: `${magnifierPos.value.screenX + 20}px`,
+    top: `${magnifierPos.value.screenY - magnifierSize / 2}px`
+  }
+})
 
 const axisNames = {
   sagittal: 'Sagittal',
@@ -168,7 +229,20 @@ onMounted(async () => {
   await loadImageInfo()
   await loadSlice()
   await loadExistingAnnotations()
+
+  // Handle window resize
+  window.addEventListener('resize', handleResize)
 })
+
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
+})
+
+function handleResize() {
+  if (currentImage.value) {
+    drawCanvas()
+  }
+}
 
 async function loadAnnotatedFiles() {
   try {
@@ -234,6 +308,9 @@ async function loadExistingAnnotations() {
     )
     if (response.data.annotations.length > 0) {
       annotationsMap.value[currentFilename.value] = response.data.annotations
+      // Redraw canvas to show loaded annotations
+      await nextTick()
+      drawCanvas()
     }
   } catch (error) {
     console.error('Failed to load existing annotations:', error)
@@ -241,28 +318,123 @@ async function loadExistingAnnotations() {
 }
 
 function drawCanvas() {
-  if (!canvas.value || !currentImage.value) return
+  if (!canvas.value || !currentImage.value || !imageContainer.value) return
 
   const ctx = canvas.value.getContext('2d')
   const img = new Image()
 
   img.onload = () => {
-    canvas.value.width = img.width
-    canvas.value.height = img.height
-    ctx.drawImage(img, 0, 0)
+    // Get container size
+    const containerRect = imageContainer.value.getBoundingClientRect()
+    const containerWidth = containerRect.width
+    const containerHeight = containerRect.height
 
-    // Draw annotation points
+    // Calculate scale ratio to fit container while preserving aspect ratio
+    const scaleX = containerWidth / img.width
+    const scaleY = containerHeight / img.height
+    scaleRatio.value = Math.min(scaleX, scaleY)
+
+    // Set canvas size to scaled image size
+    const scaledWidth = Math.floor(img.width * scaleRatio.value)
+    const scaledHeight = Math.floor(img.height * scaleRatio.value)
+    canvas.value.width = scaledWidth
+    canvas.value.height = scaledHeight
+
+    // Draw scaled image
+    ctx.drawImage(img, 0, 0, scaledWidth, scaledHeight)
+
+    // Store original image data for magnifier
+    originalImageData.value = {
+      img: img,
+      width: img.width,
+      height: img.height
+    }
+
+    // Apply filters
+    if (binarizeEnabled.value || edgeEnabled.value) {
+      const imageData = ctx.getImageData(0, 0, scaledWidth, scaledHeight)
+
+      if (binarizeEnabled.value) {
+        applyBinarize(imageData)
+      }
+
+      if (edgeEnabled.value) {
+        applyEdgeDetection(imageData, scaledWidth, scaledHeight)
+      }
+
+      ctx.putImageData(imageData, 0, 0)
+    }
+
+    // Draw annotation points (scaled)
     currentAnnotations.value.forEach(ann => {
-      // Only draw annotation points on current slice
       const annSliceIndex = getSliceIndexFromAnnotation(ann)
       if (annSliceIndex === sliceIndex.value) {
         const pos = getCanvasPosFromAnnotation(ann)
-        drawPoint(ctx, pos.x, pos.y, ann.label)
+        // Scale point position
+        const scaledX = pos.x * scaleRatio.value
+        const scaledY = pos.y * scaleRatio.value
+        drawPoint(ctx, scaledX, scaledY, ann.label)
       }
     })
   }
 
   img.src = currentImage.value
+}
+
+function applyBinarize(imageData) {
+  const data = imageData.data
+  const threshold = binarizeThreshold.value
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = (data[i] + data[i + 1] + data[i + 2]) / 3
+    const value = gray > threshold ? 255 : 0
+    data[i] = value
+    data[i + 1] = value
+    data[i + 2] = value
+  }
+}
+
+function applyEdgeDetection(imageData, width, height) {
+  const data = imageData.data
+  const grayscale = new Float32Array(width * height)
+
+  // Convert to grayscale
+  for (let i = 0; i < width * height; i++) {
+    const idx = i * 4
+    grayscale[i] = (data[idx] + data[idx + 1] + data[idx + 2]) / 3
+  }
+
+  // Sobel kernels
+  const sobelX = [-1, 0, 1, -2, 0, 2, -1, 0, 1]
+  const sobelY = [-1, -2, -1, 0, 0, 0, 1, 2, 1]
+
+  const edges = new Float32Array(width * height)
+
+  // Apply Sobel operator
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      let gx = 0, gy = 0
+      for (let ky = -1; ky <= 1; ky++) {
+        for (let kx = -1; kx <= 1; kx++) {
+          const idx = (y + ky) * width + (x + kx)
+          const kernelIdx = (ky + 1) * 3 + (kx + 1)
+          gx += grayscale[idx] * sobelX[kernelIdx]
+          gy += grayscale[idx] * sobelY[kernelIdx]
+        }
+      }
+      edges[y * width + x] = Math.sqrt(gx * gx + gy * gy)
+    }
+  }
+
+  // Overlay edges in red
+  const edgeThreshold = 30
+  for (let i = 0; i < width * height; i++) {
+    if (edges[i] > edgeThreshold) {
+      const idx = i * 4
+      data[idx] = 255     // Red
+      data[idx + 1] = 0   // Green
+      data[idx + 2] = 0   // Blue
+    }
+  }
 }
 
 function getSliceIndexFromAnnotation(ann) {
@@ -278,8 +450,8 @@ function getSliceIndexFromAnnotation(ann) {
 
 function getCanvasPosFromAnnotation(ann) {
   // Reverse conversion: convert from 3D coordinates back to canvas coordinates
-  // Original conversion is z = h - 1 - canvasY, so canvasY = h - 1 - z
-  const h = canvas.value.height
+  // Use original image height, not scaled canvas height
+  const h = originalImageData.value?.height || canvas.value.height / scaleRatio.value
   switch (currentAxis.value) {
     case 'sagittal':
       return { x: ann.y, y: h - 1 - ann.z }
@@ -318,33 +490,34 @@ function handleCanvasClick(event) {
   }
 
   const rect = canvas.value.getBoundingClientRect()
-  const scaleX = canvas.value.width / rect.width
-  const scaleY = canvas.value.height / rect.height
+  const displayScaleX = canvas.value.width / rect.width
+  const displayScaleY = canvas.value.height / rect.height
 
-  const canvasX = Math.round((event.clientX - rect.left) * scaleX)
-  const canvasY = Math.round((event.clientY - rect.top) * scaleY)
+  // Get canvas coordinates (in scaled space)
+  const scaledCanvasX = Math.round((event.clientX - rect.left) * displayScaleX)
+  const scaledCanvasY = Math.round((event.clientY - rect.top) * displayScaleY)
 
-  // Convert to 3D coordinates
-  // After rot90 coordinate mapping: canvas(cX, cY) -> original slice[cX, height-1-cY]
+  // Convert back to original image coordinates
+  const canvasX = Math.round(scaledCanvasX / scaleRatio.value)
+  const canvasY = Math.round(scaledCanvasY / scaleRatio.value)
+
+  // Convert to 3D coordinates using original image dimensions
   let x, y, z
-  const h = canvas.value.height
+  const h = originalImageData.value?.height || canvas.value.height / scaleRatio.value
   switch (currentAxis.value) {
     case 'sagittal':
-      // slice = data[x, :, :] shape (Y, Z), after rot90 shape (Z, Y)
       x = sliceIndex.value
       y = canvasX
-      z = h - 1 - canvasY
+      z = Math.round(h - 1 - canvasY)
       break
     case 'coronal':
-      // slice = data[:, y, :] shape (X, Z), after rot90 shape (Z, X)
       x = canvasX
       y = sliceIndex.value
-      z = h - 1 - canvasY
+      z = Math.round(h - 1 - canvasY)
       break
     case 'axial':
-      // slice = data[:, :, z] shape (X, Y), after rot90 shape (Y, X)
       x = canvasX
-      y = h - 1 - canvasY
+      y = Math.round(h - 1 - canvasY)
       z = sliceIndex.value
       break
   }
@@ -377,13 +550,72 @@ function handleCanvasClick(event) {
 
 function handleMouseMove(event) {
   const rect = canvas.value.getBoundingClientRect()
-  const scaleX = canvas.value.width / rect.width
-  const scaleY = canvas.value.height / rect.height
+  const displayScaleX = canvas.value.width / rect.width
+  const displayScaleY = canvas.value.height / rect.height
 
+  // Get canvas coordinates (in scaled space)
+  const scaledCanvasX = Math.round((event.clientX - rect.left) * displayScaleX)
+  const scaledCanvasY = Math.round((event.clientY - rect.top) * displayScaleY)
+
+  // Convert back to original image coordinates
   cursorPos.value = {
-    x: Math.round((event.clientX - rect.left) * scaleX),
-    y: Math.round((event.clientY - rect.top) * scaleY)
+    x: Math.round(scaledCanvasX / scaleRatio.value),
+    y: Math.round(scaledCanvasY / scaleRatio.value)
   }
+
+  // Update magnifier
+  if (magnifierEnabled.value && originalImageData.value) {
+    showMagnifier.value = true
+    magnifierPos.value = {
+      screenX: event.clientX - rect.left,
+      screenY: event.clientY - rect.top,
+      imgX: cursorPos.value.x,
+      imgY: cursorPos.value.y
+    }
+    updateMagnifier()
+  }
+}
+
+function handleMouseLeave() {
+  showMagnifier.value = false
+  magnifierPos.value = null
+}
+
+function updateMagnifier() {
+  if (!magnifierCanvas.value || !originalImageData.value || !magnifierPos.value) return
+
+  const magCtx = magnifierCanvas.value.getContext('2d')
+  magnifierCanvas.value.width = magnifierSize
+  magnifierCanvas.value.height = magnifierSize
+
+  const { img, width, height } = originalImageData.value
+  const { imgX, imgY } = magnifierPos.value
+
+  // Calculate source region
+  const sourceSize = magnifierSize / magnifierZoom
+  const sx = Math.max(0, imgX - sourceSize / 2)
+  const sy = Math.max(0, imgY - sourceSize / 2)
+  const sw = Math.min(sourceSize, width - sx)
+  const sh = Math.min(sourceSize, height - sy)
+
+  // Clear and draw magnified region
+  magCtx.fillStyle = '#000'
+  magCtx.fillRect(0, 0, magnifierSize, magnifierSize)
+  magCtx.drawImage(
+    img,
+    sx, sy, sw, sh,
+    0, 0, sw * magnifierZoom, sh * magnifierZoom
+  )
+
+  // Draw crosshair
+  magCtx.strokeStyle = '#e94560'
+  magCtx.lineWidth = 1
+  magCtx.beginPath()
+  magCtx.moveTo(magnifierSize / 2, 0)
+  magCtx.lineTo(magnifierSize / 2, magnifierSize)
+  magCtx.moveTo(0, magnifierSize / 2)
+  magCtx.lineTo(magnifierSize, magnifierSize / 2)
+  magCtx.stroke()
 }
 
 function deleteAnnotation(index) {
@@ -461,16 +693,19 @@ watch(sliceIndex, () => {
 <style scoped>
 .annotate-page {
   padding: 20px;
-  min-height: 100vh;
+  height: 100vh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+  box-sizing: border-box;
 }
 
 .header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 20px;
+  margin-bottom: 10px;
+  flex-shrink: 0;
 }
 
 .header h1 {
@@ -504,16 +739,20 @@ watch(sliceIndex, () => {
   display: flex;
   gap: 20px;
   flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .image-section {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 .image-info {
-  margin-bottom: 10px;
+  margin-bottom: 6px;
+  flex-shrink: 0;
 }
 
 .filename {
@@ -526,6 +765,7 @@ watch(sliceIndex, () => {
   display: flex;
   gap: 10px;
   margin-bottom: 10px;
+  flex-shrink: 0;
 }
 
 .axis-selector button {
@@ -545,23 +785,94 @@ watch(sliceIndex, () => {
   display: flex;
   justify-content: center;
   align-items: center;
-  min-height: 400px;
+  flex: 1;
+  min-height: 0;
 }
 
 .image-container canvas {
   max-width: 100%;
-  max-height: 600px;
+  max-height: 100%;
   cursor: crosshair;
+  object-fit: contain;
 }
 
 .cursor-info {
   position: absolute;
   bottom: 10px;
-  right: 10px;
+  left: 10px;
   background: rgba(0, 0, 0, 0.7);
   padding: 4px 8px;
   border-radius: 4px;
   font-size: 0.8em;
+}
+
+.tools-panel {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  background: rgba(22, 33, 62, 0.95);
+  padding: 10px;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 0.85em;
+}
+
+.tool-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+.tool-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.tool-item.active {
+  background: rgba(233, 69, 96, 0.3);
+}
+
+.tool-item input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+.threshold-slider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 20px;
+}
+
+.threshold-slider input[type="range"] {
+  width: 80px;
+}
+
+.threshold-slider span {
+  min-width: 30px;
+  text-align: right;
+  font-size: 0.85em;
+  color: #aaa;
+}
+
+.magnifier {
+  position: absolute;
+  pointer-events: none;
+  border: 2px solid #e94560;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  z-index: 100;
+}
+
+.magnifier canvas {
+  display: block;
 }
 
 .slice-control {
@@ -572,6 +883,7 @@ watch(sliceIndex, () => {
   padding: 10px;
   background: #16213e;
   border-radius: 8px;
+  flex-shrink: 0;
 }
 
 .slice-control input[type="range"] {
@@ -585,12 +897,15 @@ watch(sliceIndex, () => {
   padding: 20px;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .label-section h3 {
   margin-bottom: 12px;
   font-size: 1em;
   color: #e94560;
+  flex-shrink: 0;
 }
 
 .label-buttons {
@@ -598,6 +913,7 @@ watch(sliceIndex, () => {
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 20px;
+  flex-shrink: 0;
 }
 
 .label-buttons button {
@@ -623,6 +939,7 @@ watch(sliceIndex, () => {
   flex: 1;
   overflow-y: auto;
   margin-bottom: 20px;
+  min-height: 0;
 }
 
 .annotation-item {
@@ -671,6 +988,7 @@ watch(sliceIndex, () => {
 .action-buttons {
   display: flex;
   gap: 10px;
+  flex-shrink: 0;
 }
 
 .save-btn {
@@ -688,13 +1006,14 @@ watch(sliceIndex, () => {
   display: flex;
   justify-content: center;
   gap: 20px;
-  margin-top: 20px;
-  padding: 20px;
+  margin-top: 10px;
+  padding: 10px;
+  flex-shrink: 0;
 }
 
 .navigation button {
   min-width: 120px;
-  padding: 12px 24px;
+  padding: 10px 20px;
 }
 
 .message {
