@@ -11,7 +11,13 @@ from utils.nii_reader import (
     get_slice,
     slice_to_base64,
     get_middle_slice_index,
+    get_slice_with_histogram_matching,
 )
+
+# Import inference module
+import sys
+sys.path.insert(0, str(Path(__file__).parent / "centerInference"))
+from centerInference.main import inference as run_inference
 
 app = FastAPI(title="NII.GZ Point Annotation System")
 
@@ -275,6 +281,88 @@ async def get_preview(filename: str):
         info = get_image_info(str(file_path))
 
         return {"previews": previews, "info": info}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/image/{filename}/histogram-matched")
+async def get_histogram_matched_image(
+    filename: str,
+    reference: str = Query(..., description="Reference filename for histogram matching"),
+    axis: str = Query(default="sagittal", description="Slice direction"),
+    slice_index: Optional[int] = Query(default=None, description="Slice index"),
+):
+    """Get slice with histogram matching applied"""
+    if not state["folder_path"]:
+        raise HTTPException(status_code=400, detail="Folder not set yet")
+
+    file_path = Path(state["folder_path"]) / filename
+    reference_path = Path(state["folder_path"]) / reference
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Source file does not exist")
+
+    if not reference_path.exists():
+        raise HTTPException(status_code=404, detail="Reference file does not exist")
+
+    try:
+        # If slice index is not specified, use middle slice
+        if slice_index is None:
+            slice_index = get_middle_slice_index(str(file_path), axis)
+
+        matched_slice = get_slice_with_histogram_matching(
+            str(file_path),
+            str(reference_path),
+            axis,
+            slice_index
+        )
+        base64_image = slice_to_base64(matched_slice, already_normalized=True)
+
+        return {
+            "image": base64_image,
+            "axis": axis,
+            "slice_index": slice_index,
+            "reference": reference,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/inference/{filename}")
+async def get_inference(filename: str):
+    """Run model inference on a NIfTI file to get suggested annotations"""
+    if not state["folder_path"]:
+        raise HTTPException(status_code=400, detail="Folder not set yet")
+
+    file_path = Path(state["folder_path"]) / filename
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File does not exist")
+
+    try:
+        result = run_inference(str(file_path))
+
+        # Convert to annotation format
+        # The inference returns x, y in axial view coordinates
+        # z_index is the axial slice index (z coordinate)
+        annotations = []
+        z_index = result["z_index"]
+
+        for label, coords in result["landmarks"].items():
+            annotations.append({
+                "label": label,
+                "x": round(coords["x"]),  # x in axial view stays as x
+                "y": round(coords["y"]),  # y in axial view stays as y
+                "z": z_index,             # axial slice index becomes z
+            })
+
+        return {
+            "success": True,
+            "annotations": annotations,
+            "z_index": z_index,
+        }
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

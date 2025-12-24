@@ -16,6 +16,8 @@ A medical image point annotation tool for marking point locations on spine image
 - Customizable Label list (default: L1-L5)
 - Click on image to annotate
 - Auto-save annotations to CSV
+- AI-assisted annotation: automatic landmark detection for unannotated files
+- Accept/dismiss suggested annotations from AI model
 
 ## Project Structure
 
@@ -24,6 +26,12 @@ Center_Detection/
 ├── backend/
 │   ├── main.py              # FastAPI main program
 │   ├── requirements.txt     # Python dependencies
+│   ├── centerInference/     # AI inference module for automatic annotation
+│   │   ├── main.py          # Inference entry point
+│   │   ├── model.py         # CenterDetectionNet model
+│   │   ├── preprocessing.py # MRI preprocessing
+│   │   └── Model/
+│   │       └── best_model.pth  # Trained model weights
 │   └── utils/
 │       └── nii_reader.py    # NII.GZ reader utility
 ├── frontend/
@@ -168,6 +176,39 @@ python visualize.py --auto --mode detail -o detail_result.png
 | `--mode` | View mode: `overview` (default) or `detail` |
 | `-o, --output` | Output image path (optional) |
 
+## AI Inference Module
+
+### Overview
+
+The centerInference module provides AI-assisted automatic landmark detection using deep learning to identify L1-L5 vertebral center points on MRI images.
+
+### Model Architecture
+
+- **Backbone**: ResNet34
+- **Head**: Heatmap-based detection head
+- **Input**: NIfTI format MRI images
+- **Output**: Coordinates for 5 landmarks (L1-L5)
+
+### Usage
+
+The AI inference is automatically triggered when:
+- Opening an unannotated file in the annotation page
+- Manually calling the inference API endpoint
+
+The system will:
+1. Preprocess the MRI image
+2. Run inference using the trained model
+3. Extract landmark coordinates from generated heatmaps
+4. Present suggested annotations to the user
+5. Allow the user to accept or dismiss the AI suggestions
+
+### Model Files
+
+The trained model weights are stored in:
+```
+backend/centerInference/Model/best_model.pth
+```
+
 ## API Endpoints
 
 | Method | Endpoint | Description |
@@ -180,6 +221,7 @@ python visualize.py --auto --mode detail -o detail_result.png
 | GET | `/api/preview/{filename}` | Get three-orientation preview |
 | POST | `/api/annotations` | Save annotations |
 | GET | `/api/annotations/{filename}` | Load annotations |
+| GET | `/api/inference/{filename}` | Run AI inference for suggested annotations |
 
 ## Keyboard Shortcuts
 

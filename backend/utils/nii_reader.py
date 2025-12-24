@@ -60,9 +60,12 @@ def normalize_to_uint8(data: np.ndarray) -> np.ndarray:
     return normalized.astype(np.uint8)
 
 
-def slice_to_base64(slice_data: np.ndarray) -> str:
+def slice_to_base64(slice_data: np.ndarray, already_normalized: bool = False) -> str:
     """Convert slice data to Base64 encoded PNG"""
-    normalized = normalize_to_uint8(slice_data)
+    if already_normalized:
+        normalized = slice_data.astype(np.uint8)
+    else:
+        normalized = normalize_to_uint8(slice_data)
 
     # Rotate image for correct display
     normalized = np.rot90(normalized)
@@ -89,3 +92,58 @@ def get_middle_slice_index(file_path: str, axis: str) -> int:
         return info["axial_range"] // 2
     else:
         raise ValueError(f"Unknown axis: {axis}")
+
+
+def histogram_matching(source: np.ndarray, reference: np.ndarray) -> np.ndarray:
+    """
+    Apply histogram matching to make source image have similar histogram as reference.
+    Both inputs should be normalized to 0-255 range.
+    """
+    # Flatten the arrays
+    source_flat = source.flatten()
+    reference_flat = reference.flatten()
+
+    # Calculate histograms and CDFs
+    source_hist, bin_edges = np.histogram(source_flat, bins=256, range=(0, 256))
+    reference_hist, _ = np.histogram(reference_flat, bins=256, range=(0, 256))
+
+    # Calculate CDFs
+    source_cdf = np.cumsum(source_hist).astype(np.float64)
+    source_cdf = source_cdf / source_cdf[-1]  # Normalize to [0, 1]
+
+    reference_cdf = np.cumsum(reference_hist).astype(np.float64)
+    reference_cdf = reference_cdf / reference_cdf[-1]  # Normalize to [0, 1]
+
+    # Create lookup table
+    lookup_table = np.zeros(256, dtype=np.uint8)
+    for i in range(256):
+        # Find the closest value in reference CDF
+        diff = np.abs(reference_cdf - source_cdf[i])
+        lookup_table[i] = np.argmin(diff)
+
+    # Apply the mapping
+    matched = lookup_table[source.astype(np.uint8)]
+    return matched
+
+
+def get_slice_with_histogram_matching(
+    file_path: str,
+    reference_file_path: str,
+    axis: str,
+    slice_index: int
+) -> np.ndarray:
+    """
+    Get slice with histogram matching applied using reference image.
+    """
+    # Get source slice
+    source_slice = get_slice(file_path, axis, slice_index)
+    source_normalized = normalize_to_uint8(source_slice)
+
+    # Get reference image data (use the whole 3D volume for histogram)
+    reference_data = load_nii(reference_file_path)
+    reference_normalized = normalize_to_uint8(reference_data)
+
+    # Apply histogram matching
+    matched = histogram_matching(source_normalized, reference_normalized)
+
+    return matched

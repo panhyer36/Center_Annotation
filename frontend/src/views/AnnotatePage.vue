@@ -73,6 +73,18 @@
               <input type="checkbox" v-model="magnifierEnabled" />
               <span>Magnifier</span>
             </label>
+            <label class="tool-item" :class="{ active: histogramMatchEnabled }">
+              <input type="checkbox" v-model="histogramMatchEnabled" @change="onHistogramMatchToggle" />
+              <span>Histogram Match</span>
+            </label>
+            <div v-if="histogramMatchEnabled" class="histogram-match-control">
+              <select v-model="histogramMatchReference" @change="loadSlice" class="reference-selector">
+                <option value="">Select reference...</option>
+                <option v-for="img in availableReferences" :key="img" :value="img">
+                  {{ img }}
+                </option>
+              </select>
+            </div>
           </div>
         </div>
 
@@ -121,6 +133,29 @@
           </p>
         </div>
 
+        <!-- AI Suggestion Panel -->
+        <div v-if="hasSuggestion" class="suggestion-panel">
+          <h4>AI Suggested Annotations</h4>
+          <div class="suggestion-list">
+            <div v-for="ann in suggestedAnnotations" :key="ann.label" class="suggestion-item">
+              <span class="sugg-label">{{ ann.label }}</span>
+              <span class="sugg-coords">({{ ann.x }}, {{ ann.y }}, {{ ann.z }})</span>
+            </div>
+          </div>
+          <div class="suggestion-actions">
+            <button @click="acceptSuggestedAnnotations" class="accept-btn">
+              Accept Suggestions
+            </button>
+            <button @click="dismissSuggestion" class="dismiss-btn">
+              Dismiss
+            </button>
+          </div>
+        </div>
+
+        <div v-if="isLoadingSuggestion" class="loading-suggestion">
+          Running AI inference...
+        </div>
+
         <div class="action-buttons">
           <button @click="saveAnnotations" class="save-btn" :disabled="saving">
             {{ saving ? 'Saving...' : 'Save Annotations' }}
@@ -133,6 +168,14 @@
       <button @click="prevImage" :disabled="currentIndex === 0">
         Previous
       </button>
+      <select v-model="currentIndex" @change="onFileSelect" class="file-selector">
+        <option v-for="(img, idx) in images" :key="idx" :value="idx">
+          {{ idx + 1 }}. {{ img }} {{ annotatedFiles.includes(img) ? '✓' : '○' }}
+        </option>
+      </select>
+      <span class="annotation-status">
+        {{ annotatedFiles.length }} / {{ images.length }} annotated
+      </span>
       <button @click="nextImage" :disabled="currentIndex === images.length - 1">
         Next
       </button>
@@ -178,6 +221,12 @@ const magnifierCanvas = ref(null)
 // Annotation data for each image
 const annotationsMap = ref({})
 
+// Suggested annotations from model inference
+const suggestedAnnotations = ref([])
+const suggestedZIndex = ref(null)
+const isLoadingSuggestion = ref(false)
+const hasSuggestion = ref(false)
+
 // Image scaling state
 const scaleRatio = ref(1)
 const originalImageData = ref(null)
@@ -191,6 +240,13 @@ const showMagnifier = ref(false)
 const magnifierPos = ref(null)
 const magnifierSize = 150
 const magnifierZoom = 3
+const histogramMatchEnabled = ref(false)
+const histogramMatchReference = ref('')
+
+// Available reference files (exclude current file)
+const availableReferences = computed(() => {
+  return images.value.filter(img => img !== currentFilename.value)
+})
 
 const magnifierStyle = computed(() => {
   if (!magnifierPos.value) return {}
@@ -284,15 +340,31 @@ function updateMaxSliceIndex() {
 
 async function loadSlice() {
   try {
-    const response = await axios.get(
-      `${API_BASE}/api/image/${currentFilename.value}`,
-      {
-        params: {
-          axis: currentAxis.value,
-          slice_index: sliceIndex.value
+    let response
+    if (histogramMatchEnabled.value && histogramMatchReference.value) {
+      // Use histogram-matched endpoint
+      response = await axios.get(
+        `${API_BASE}/api/image/${currentFilename.value}/histogram-matched`,
+        {
+          params: {
+            reference: histogramMatchReference.value,
+            axis: currentAxis.value,
+            slice_index: sliceIndex.value
+          }
         }
-      }
-    )
+      )
+    } else {
+      // Use normal endpoint
+      response = await axios.get(
+        `${API_BASE}/api/image/${currentFilename.value}`,
+        {
+          params: {
+            axis: currentAxis.value,
+            slice_index: sliceIndex.value
+          }
+        }
+      )
+    }
     currentImage.value = response.data.image
     await nextTick()
     drawCanvas()
@@ -302,6 +374,10 @@ async function loadSlice() {
 }
 
 async function loadExistingAnnotations() {
+  // Clear any previous suggestions when switching files
+  suggestedAnnotations.value = []
+  hasSuggestion.value = false
+
   try {
     const response = await axios.get(
       `${API_BASE}/api/annotations/${currentFilename.value}`
@@ -311,9 +387,14 @@ async function loadExistingAnnotations() {
       // Redraw canvas to show loaded annotations
       await nextTick()
       drawCanvas()
+    } else {
+      // No existing annotations - run inference automatically
+      runInference()
     }
   } catch (error) {
     console.error('Failed to load existing annotations:', error)
+    // If loading fails, still try inference
+    runInference()
   }
 }
 
@@ -363,6 +444,19 @@ function drawCanvas() {
       }
 
       ctx.putImageData(imageData, 0, 0)
+    }
+
+    // Draw suggested annotation points first (so actual ones overlay them)
+    if (hasSuggestion.value) {
+      suggestedAnnotations.value.forEach(ann => {
+        const annSliceIndex = getSliceIndexFromAnnotation(ann)
+        if (annSliceIndex === sliceIndex.value) {
+          const pos = getCanvasPosFromAnnotation(ann)
+          const scaledX = pos.x * scaleRatio.value
+          const scaledY = pos.y * scaleRatio.value
+          drawSuggestedPoint(ctx, scaledX, scaledY, ann.label)
+        }
+      })
     }
 
     // Draw annotation points (scaled)
@@ -481,6 +575,34 @@ function drawPoint(ctx, x, y, label) {
   ctx.lineWidth = 3
   ctx.strokeText(label, x + 10, y - 10)
   ctx.fillText(label, x + 10, y - 10)
+}
+
+function drawSuggestedPoint(ctx, x, y, label) {
+  // Draw suggested point with orange/yellow color and dashed circle
+  const color = '#ffa500'  // Orange for suggested points
+
+  // Draw dashed circle
+  ctx.beginPath()
+  ctx.setLineDash([3, 3])
+  ctx.arc(x, y, 8, 0, 2 * Math.PI)
+  ctx.strokeStyle = color
+  ctx.lineWidth = 2
+  ctx.stroke()
+  ctx.setLineDash([])
+
+  // Draw inner dot
+  ctx.beginPath()
+  ctx.arc(x, y, 4, 0, 2 * Math.PI)
+  ctx.fillStyle = color
+  ctx.fill()
+
+  // Draw label text with "(suggested)" suffix
+  ctx.font = 'bold 11px sans-serif'
+  ctx.fillStyle = color
+  ctx.strokeStyle = '#000'
+  ctx.lineWidth = 3
+  ctx.strokeText(`${label} (AI)`, x + 12, y - 10)
+  ctx.fillText(`${label} (AI)`, x + 12, y - 10)
 }
 
 function handleCanvasClick(event) {
@@ -677,6 +799,92 @@ function goBack() {
   router.push('/')
 }
 
+function onHistogramMatchToggle() {
+  if (!histogramMatchEnabled.value) {
+    histogramMatchReference.value = ''
+  }
+  loadSlice()
+}
+
+async function runInference() {
+  if (isLoadingSuggestion.value) return
+
+  isLoadingSuggestion.value = true
+  suggestedAnnotations.value = []
+  hasSuggestion.value = false
+
+  try {
+    const response = await axios.get(
+      `${API_BASE}/api/inference/${currentFilename.value}`
+    )
+
+    if (response.data.success) {
+      suggestedAnnotations.value = response.data.annotations
+      suggestedZIndex.value = response.data.z_index
+      hasSuggestion.value = true
+
+      // Switch to axial view and go to suggested z_index
+      if (currentAxis.value !== 'axial') {
+        await changeAxis('axial')
+      }
+      sliceIndex.value = suggestedZIndex.value
+      await loadSlice()
+
+      showMessage('Model inference completed. Review and accept if correct.', 'success')
+    }
+  } catch (error) {
+    console.error('Inference failed:', error)
+    showMessage('Inference failed: ' + (error.response?.data?.detail || error.message), 'error')
+  } finally {
+    isLoadingSuggestion.value = false
+  }
+}
+
+function acceptSuggestedAnnotations() {
+  if (!hasSuggestion.value || suggestedAnnotations.value.length === 0) return
+
+  // Copy suggested annotations to current annotations
+  if (!annotationsMap.value[currentFilename.value]) {
+    annotationsMap.value[currentFilename.value] = []
+  }
+
+  // Replace or add each suggested annotation
+  suggestedAnnotations.value.forEach(suggested => {
+    const existingIndex = annotationsMap.value[currentFilename.value].findIndex(
+      ann => ann.label === suggested.label
+    )
+
+    if (existingIndex >= 0) {
+      annotationsMap.value[currentFilename.value][existingIndex] = { ...suggested }
+    } else {
+      annotationsMap.value[currentFilename.value].push({ ...suggested })
+    }
+  })
+
+  // Clear suggestions
+  suggestedAnnotations.value = []
+  hasSuggestion.value = false
+
+  drawCanvas()
+  showMessage('Suggested annotations accepted!', 'success')
+}
+
+function dismissSuggestion() {
+  suggestedAnnotations.value = []
+  hasSuggestion.value = false
+  drawCanvas()
+}
+
+async function onFileSelect() {
+  // Auto-save current annotations before switching
+  if (currentAnnotations.value.length > 0) {
+    await saveAnnotations()
+  }
+  await loadImageInfo()
+  await loadSlice()
+  await loadExistingAnnotations()
+}
+
 function showMessage(msg, type) {
   message.value = msg
   messageType.value = type
@@ -861,6 +1069,31 @@ watch(sliceIndex, () => {
   color: #aaa;
 }
 
+.histogram-match-control {
+  padding-left: 20px;
+}
+
+.reference-selector {
+  width: 100%;
+  padding: 4px 8px;
+  background: #0f3460;
+  color: #eee;
+  border: 1px solid #16213e;
+  border-radius: 4px;
+  font-size: 0.8em;
+  cursor: pointer;
+}
+
+.reference-selector:focus {
+  outline: none;
+  border-color: #e94560;
+}
+
+.reference-selector option {
+  background: #0f3460;
+  color: #eee;
+}
+
 .magnifier {
   position: absolute;
   pointer-events: none;
@@ -985,6 +1218,86 @@ watch(sliceIndex, () => {
   padding: 20px;
 }
 
+.suggestion-panel {
+  background: rgba(255, 165, 0, 0.15);
+  border: 1px solid #ffa500;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 15px;
+}
+
+.suggestion-panel h4 {
+  margin: 0 0 10px 0;
+  color: #ffa500;
+  font-size: 0.95em;
+}
+
+.suggestion-list {
+  max-height: 120px;
+  overflow-y: auto;
+  margin-bottom: 10px;
+}
+
+.suggestion-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+  margin-bottom: 4px;
+  font-size: 0.85em;
+}
+
+.sugg-label {
+  font-weight: bold;
+  color: #ffa500;
+  min-width: 30px;
+}
+
+.sugg-coords {
+  color: #aaa;
+}
+
+.suggestion-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.accept-btn {
+  flex: 1;
+  background: #ffa500;
+  color: #000;
+  font-weight: bold;
+  padding: 8px;
+}
+
+.accept-btn:hover {
+  background: #ffb732;
+}
+
+.dismiss-btn {
+  padding: 8px 12px;
+  background: #666;
+}
+
+.dismiss-btn:hover {
+  background: #888;
+}
+
+.loading-suggestion {
+  text-align: center;
+  padding: 15px;
+  color: #ffa500;
+  font-size: 0.9em;
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 .action-buttons {
   display: flex;
   gap: 10px;
@@ -1014,6 +1327,35 @@ watch(sliceIndex, () => {
 .navigation button {
   min-width: 120px;
   padding: 10px 20px;
+}
+
+.file-selector {
+  flex: 1;
+  max-width: 400px;
+  padding: 10px 15px;
+  background: #16213e;
+  color: #eee;
+  border: 1px solid #0f3460;
+  border-radius: 6px;
+  font-size: 0.95em;
+  cursor: pointer;
+}
+
+.file-selector:focus {
+  outline: none;
+  border-color: #e94560;
+}
+
+.file-selector option {
+  background: #16213e;
+  color: #eee;
+  padding: 8px;
+}
+
+.annotation-status {
+  font-size: 0.85em;
+  color: #4ade80;
+  white-space: nowrap;
 }
 
 .message {
