@@ -209,6 +209,10 @@ The trained model weights are stored in:
 backend/centerInference/Model/best_model.pth
 ```
 
+**Note**: The model file is not included in this repository due to size limitations. If you need the model file, please contact:
+- **Yu-Erh Pan**, University of Wisconsin-Milwaukee
+- Email: yuerhpan@uwm.edu
+
 ## API Endpoints
 
 | Method | Endpoint | Description |
