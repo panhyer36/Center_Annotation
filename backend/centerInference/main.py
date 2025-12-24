@@ -36,13 +36,14 @@ def get_device() -> str:
     return "cpu"
 
 
-def inference(file_path: str, model_path: str = None) -> dict:
+def inference(file_path: str, model_path: str = None, z_index: int = None) -> dict:
     """
     Perform inference on a single NIfTI file
 
     Args:
         file_path: Path to NIfTI file
         model_path: Path to model weights
+        z_index: Z-axis index for inference (default: middle slice)
 
     Returns:
         dict: Annotation results
@@ -67,7 +68,7 @@ def inference(file_path: str, model_path: str = None) -> dict:
 
     # Preprocessing
     preprocessor = MRIPreprocessor(target_size=input_size)
-    result = preprocessor.preprocess(file_path)
+    result = preprocessor.preprocess(file_path, z_index)
 
     # Prepare input
     image = result["image"]

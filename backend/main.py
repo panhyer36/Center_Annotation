@@ -329,7 +329,10 @@ async def get_histogram_matched_image(
 
 
 @app.get("/api/inference/{filename}")
-async def get_inference(filename: str):
+async def get_inference(
+    filename: str,
+    z_index: Optional[int] = Query(default=None, description="Z-axis index for inference (default: middle slice)"),
+):
     """Run model inference on a NIfTI file to get suggested annotations"""
     if not state["folder_path"]:
         raise HTTPException(status_code=400, detail="Folder not set yet")
@@ -340,7 +343,7 @@ async def get_inference(filename: str):
         raise HTTPException(status_code=404, detail="File does not exist")
 
     try:
-        result = run_inference(str(file_path))
+        result = run_inference(str(file_path), z_index=z_index)
 
         # Convert to annotation format
         # The inference returns x, y in axial view coordinates

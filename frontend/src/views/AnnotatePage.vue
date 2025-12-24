@@ -156,6 +156,12 @@
           Running AI inference...
         </div>
 
+        <div v-if="currentAxis === 'axial' && !hasSuggestion && !isLoadingSuggestion" class="inference-action">
+          <button @click="runInference" class="inference-btn">
+            Run Inference (z={{ sliceIndex }})
+          </button>
+        </div>
+
         <div class="action-buttons">
           <button @click="saveAnnotations" class="save-btn" :disabled="saving">
             {{ saving ? 'Saving...' : 'Save Annotations' }}
@@ -814,16 +820,20 @@ async function runInference() {
   hasSuggestion.value = false
 
   try {
-    const response = await axios.get(
-      `${API_BASE}/api/inference/${currentFilename.value}`
-    )
+    // Pass current sliceIndex if in axial view, otherwise use default (middle)
+    const zIndex = currentAxis.value === 'axial' ? sliceIndex.value : null
+    const url = zIndex !== null
+      ? `${API_BASE}/api/inference/${currentFilename.value}?z_index=${zIndex}`
+      : `${API_BASE}/api/inference/${currentFilename.value}`
+
+    const response = await axios.get(url)
 
     if (response.data.success) {
       suggestedAnnotations.value = response.data.annotations
       suggestedZIndex.value = response.data.z_index
       hasSuggestion.value = true
 
-      // Switch to axial view and go to suggested z_index
+      // Switch to axial view and go to the inference z_index
       if (currentAxis.value !== 'axial') {
         await changeAxis('axial')
       }
@@ -1291,6 +1301,23 @@ watch(sliceIndex, () => {
   color: #ffa500;
   font-size: 0.9em;
   animation: pulse 1.5s infinite;
+}
+
+.inference-action {
+  margin: 10px 0;
+}
+
+.inference-btn {
+  width: 100%;
+  background: #4a90d9;
+  color: #fff;
+  font-weight: bold;
+  padding: 10px;
+  border-radius: 4px;
+}
+
+.inference-btn:hover {
+  background: #5da0e9;
 }
 
 @keyframes pulse {

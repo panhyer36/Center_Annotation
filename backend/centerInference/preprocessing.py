@@ -11,9 +11,13 @@ class MRIPreprocessor:
     def __init__(self, target_size: Tuple[int, int] = (320, 320)):
         self.target_size = target_size
 
-    def load_nifti(self, file_path: str) -> Tuple[np.ndarray, int]:
+    def load_nifti(self, file_path: str, z_index: int = None) -> Tuple[np.ndarray, int]:
         """
-        Load NIfTI file and extract middle slice
+        Load NIfTI file and extract specified slice
+
+        Args:
+            file_path: Path to NIfTI file
+            z_index: Z-axis index (default: middle slice)
 
         Returns:
             image_2d: 2D slice
@@ -22,8 +26,13 @@ class MRIPreprocessor:
         img = nib.load(file_path)
         data = img.get_fdata()
 
-        # Get middle slice along Z-axis
-        z_index = data.shape[2] // 2
+        # Get specified slice or middle slice along Z-axis
+        if z_index is None:
+            z_index = data.shape[2] // 2
+        else:
+            # Clamp z_index to valid range
+            z_index = max(0, min(z_index, data.shape[2] - 1))
+
         slice_2d = data[:, :, z_index]
 
         # Rotate 90 degrees (Axial view correction)
@@ -57,9 +66,13 @@ class MRIPreprocessor:
         )
         return resized.astype(np.float32), original_size
 
-    def preprocess(self, file_path: str) -> dict:
+    def preprocess(self, file_path: str, z_index: int = None) -> dict:
         """
         Complete preprocessing pipeline
+
+        Args:
+            file_path: Path to NIfTI file
+            z_index: Z-axis index (default: middle slice)
 
         Returns:
             dict: {
@@ -70,8 +83,8 @@ class MRIPreprocessor:
                 'scale_y': Y-axis scale ratio,
             }
         """
-        # Load and extract middle slice
-        image_2d, z_index = self.load_nifti(file_path)
+        # Load and extract specified slice
+        image_2d, z_index = self.load_nifti(file_path, z_index)
         original_size = image_2d.shape
 
         # Normalize
